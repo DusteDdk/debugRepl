@@ -1,0 +1,30 @@
+{
+  "name": "debugrepl",
+  "version": "0.5.0",
+  "description": "DSTs debug REPL",
+  "main": "dist/debugRepl.js",
+  "types": "dist/debugRepl.d.ts",
+  "files": [
+    "dist/debugRepl.d.ts",
+    "dist/debugRepl.js",
+    "dist/wsClient.js",
+    "src/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build"
+  },
+  "bin": {
+    "wsDebugReplClient": "./bin/wsClient.js"
+  },
+  "author": "DST",
+  "license": "WTFPL",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.1",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.3"
+  }
+}
