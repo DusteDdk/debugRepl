@@ -3,6 +3,7 @@
 
 const fs = require('fs');
 const Websocket = require('ws').WebSocket;
+const path = require('path');
 
 const arg = process.argv[2];
 
@@ -17,7 +18,8 @@ if(arg) {
     }
 } else {
 
-    console.error('Needs one argument: URL');
+    console.error('Usage:');
+    console.error(`    ${process.argv[1]} URL`);
     process.exit(1);
 }
 
@@ -79,6 +81,17 @@ ws.on('message', (data)=>{
 
         if(msg.c) {
             console.log.apply(console, msg.c);
+        }
+
+        if(msg.from) {
+            const fileName = path.resolve(`DBGRPL_${msg.toName}.js`);
+            fs.unwatchFile(fileName);
+            fs.writeFileSync(fileName, msg.from, {encoding: 'utf8'});
+            console.log(`debugReplClient: Saved ${fileName} (${msg.from.length} b)`);
+            fs.watchFile(fileName, { }, (stat)=>{
+                const txt = fs.readFileSync(fileName, {encoding: 'utf8'});
+                ws.send( JSON.stringify( {fileName, toName: msg.toName, to: txt} ) );
+            });
         }
     } catch(e) {
         console.log('MSG error:',e);

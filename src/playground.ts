@@ -12,7 +12,7 @@ class StrangeClass {
             const returnValue = this.a + this.b + c;
             await beforeReturn( ()=>({instance: this, returnValue}));
             return returnValue;
-    });
+    }, this);
 }
 
 const sc = new StrangeClass(1,2);

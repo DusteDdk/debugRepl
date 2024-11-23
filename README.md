@@ -31,7 +31,7 @@ alternatively, just reference the instance directly.
 addCap is better for functions.
 
 
-## uncap(name)
+## unCap(name)
 Stop capturing a value (for example to avoid a memory leak)
 Shouldn't be needed, it is suggested to only capture long-running
 data. Or to capture an object that contains a property which can then
@@ -85,9 +85,9 @@ Useful for instrumenting medium-lived methods without leaking memory.
 Environment variables
 =====================
 The following variables are available to control the debugRepl behaviour.
-DBGRPL_NO_STDIO=true     - Never open REPL on stdin/out
-DBGRPL_NO_SOCKETS=true   - Never open websocket for REPL.
-
+DBGRPL_NO_STDIO=true      - Never open REPL on stdin/out
+DBGRPL_NO_SOCKETS=true    - Never open websocket for REPL.
+DBRPL_SOCKET_ON_BOOT=true - Start a websocket on boot.
 
 Using the socket
 ================

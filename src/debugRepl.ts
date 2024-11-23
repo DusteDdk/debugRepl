@@ -1,9 +1,8 @@
 
+import vm from 'node:vm';
 import { randomUUID } from "crypto";
-import { readFileSync, writeFileSync } from "fs";
-import { spawn } from "node:child_process";
 import { networkInterfaces } from 'os';
-import { ReadableOptions,Readable, Writable, Stream } from "stream";
+import { ReadableOptions,Readable, Writable } from "stream";
 import WebSocket, { WebSocketServer } from "ws";
 import repl from "node:repl";
 
@@ -72,7 +71,7 @@ let proxId = 0;
 
 type GetScopeCallback = ()=>object;
 type Poi = (gsc: GetScopeCallback)=>void | Promise<void>;
-type PoiSub = null | ((scope: any )=> any);
+type PoiSub = null | ((scope: any )=> boolean);
 interface PoiDesc {
     id: number;
     desc: string;
@@ -207,7 +206,30 @@ function startSocket() {
             }
         });
 
-        delete x.edit;
+
+        r.defineCommand('from', (cmd: string)=>{
+            const [inName, to, toName] = cmd.split(' ');
+            if(inName && to === 'to' && toName) {
+
+                const inObj = vm.runInThisContext(inName);
+                if(!inObj) {
+                    out(`${inName} not found`);
+                    return;
+                }
+
+                if(typeof inObj === 'object') {
+                    ws.send( JSON.stringify( { toName, from: `(${JSON.stringify(inObj,null,4)})`}) );
+                } else if(typeof inObj === 'function') {
+                    ws.send( JSON.stringify( { toName, from: inObj.toString()}) );
+                }
+
+            } else {
+                out('Usage: .from SRCNAME to DESTNAME - sends object to client file and declares DESTNAME in local context on file change (websocket only)');
+                return;
+            }
+        });
+
+
 
         ws.on('message', (buf)=>{
 
@@ -226,8 +248,23 @@ function startSocket() {
                     input.insert( bin );
                 }
 
+                if(msg.to) {
+                    const str = msg.to;
+                    const toName = msg.toName;
+                    const filename = msg.fileName;
+                    try {
+                        //const fromResult = eval(str);
+                        const script = new vm.Script(str, {filename});
+                        const inResult = script.runInThisContext();
+                        out(`debugRepl: ${toName} = ${typeof inResult} from ${filename} (${str.length} b) `);
+                        r.context[toName] = inResult;
+                    } catch(e) {
+                        out(`debugRepl: Evaluation failed: ${(e as Error).message}`);
+                    }
+                }
+
             } catch(e) {
-                console.error(`Error parsing message from ${clientNum}`);
+                console.error(`debugRepl: Error parsing message from ${clientNum}`);
                 console.error(e);
             }
         });
@@ -251,6 +288,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
         out('  .poi      -- Show how to use points of interest.');
         out('  .x        -- Show info about values registered with "cap()".');
         out('  .str VAR  -- Pretty JSON.stringify the variable and show it.');
+        out('  .from SRCNAME DSTNAME -- Send the string representation of SRC name to file DSTNAME on socket client.');
         out('');
     });
 
@@ -314,6 +352,15 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             return;
         }
 
+        if(cmd === 'ls') {
+            out(`Point of interest functions:`);
+            for(const pe of poiList) {
+                out(`  ${pe.proxId}: ${pe.name} ${pe.tracking ? '(tracking)': '(not tracking)'}`);
+            }
+            out(``);
+            return;
+        }
+
         const [fpoiStr, funName, via, stackStr] = cmd.split(' ').map( s=>s.replace(/ /g, ''));
 
 
@@ -331,11 +378,17 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             out(fpoi.proxy.toString());
             return;
         }
+
         if(funName === 'via') {
             out('via is a reserved name for .prox it may not be used in functions.\nDid you forget the function name?');
             return;
         }
 
+        if(funName === 'to' && via) {
+            out(`Saving active implementation of ${fpoiNum} to local variable ${via}`);
+            r.context[via] = fpoi.proxy;
+            return;
+        }
 
         if(!funName) {
             out(`Unproxied ${fpoi.proxId} ${fpoi.name}`);
@@ -370,12 +423,14 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             out('  .track ls  - Show recorded stack traces for POIs.');
             out('  .track PNUM - Toggle recording of stack traces for POI.');
             out('\nOverwriting POIs:');
+            out('  .prox ls  - list proxied implementations.');
             out('  .prox PNUM ls - List source for currently active implementation.');
             out('  .prox PNUM [NAME [via STR]]');
             out('    - When no proxy is in place: Replaces original implementation with function of NAME for POI');
             out('      when "via STR" provided, call function of NAME only when stacktrace contains STR,');
             out('        note: "via STR" enables tracking.');
-            out('    - When any proxy is in place: Restores original implementation.\n');
+            out('    - When any proxy is in place: Restores original implementation.');
+            out('  .prox PNUM to DSTNAME - save reference to implementation in DSTNAME');
             return;
         }
 
@@ -420,7 +475,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
 
                 if(poi.resume) {
                     // resume
-                    out(`Resuming ${pid}`);
+                    out(`Resuming ${poi.desc} ${pid}`);
                     const resume = poi.resume;
                     poi.resume=null;
                     setImmediate( resume );
@@ -442,7 +497,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
                 poi.sub = (scope)=>{
                     const stack = (new Error().stack ?? '').split('\n').slice(3).join('\n');
                     if(poi.subVia && stack.indexOf(poi.subVia)=== -1) {
-                        return;
+                        return false;
                     }
                     out(`\nEntered POI ${poi.id} - ${poi.desc}, via:`);
                     out( stack );
@@ -452,6 +507,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
                         out(`    ${k} [${typeof scope[k]}]`);
                     }
                     out(`\nCode might be waiting: remember to .poi ${poi.id} to continue.\n`);
+                    return true;
                 };
 
             } else {
@@ -467,7 +523,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
     };
     r.context.api = {
         cap,
-        uncap,
+        unCap,
         addPoi,
         delPoi
     };
@@ -493,6 +549,10 @@ function toggleSocket() {
     } else {
         stopSocket();
     }
+}
+
+if(process.env.DBRPL_SOCKET_ON_BOOT === 'true') {
+    toggleSocket();
 }
 
 if(process.env.DBGRPL_NO_SOCKETS !== 'true') {
@@ -534,7 +594,7 @@ export function cap(v: Record<string, any>) {
     }
 };
 
-export function uncap(k: string) {
+export function unCap(k: string) {
     delete x[k];
     delete registeredMeta[k];
 }
@@ -555,8 +615,7 @@ function poi(desc: string): {desc: PoiDesc, breakFunc: Poi} {
 
     return {
         breakFunc: (scopeCb: GetScopeCallback) =>{
-            if(self.sub) {
-                self.sub(scopeCb());
+            if(self.sub && self.sub(scopeCb()) ) {
                 self.sub = null;
                 return new Promise( resolve=>{
                     self.resume = resolve;

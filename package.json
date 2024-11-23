@@ -1,6 +1,6 @@
 {
-  "name": "debugrepl",
-  "version": "0.5.0",
+  "name": "@dusted/debugrepl",
+  "version": "0.5.1",
   "description": "DSTs debug REPL",
   "main": "dist/debugRepl.js",
   "types": "dist/debugRepl.d.ts",
@@ -8,7 +8,8 @@
     "dist/debugRepl.d.ts",
     "dist/debugRepl.js",
     "dist/wsClient.js",
-    "src/"
+    "src/",
+    "tsconfig.json"
   ],
   "scripts": {
     "build": "tsc",
@@ -19,6 +20,10 @@
   },
   "author": "DST",
   "license": "WTFPL",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DusteDdk/debugRepl"
+  },
   "dependencies": {
     "ws": "^8.18.0"
   },
