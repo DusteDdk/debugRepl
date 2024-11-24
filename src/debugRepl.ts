@@ -1,5 +1,5 @@
 
-import vm from 'node:vm';
+import vm, { Context } from 'node:vm';
 import { randomUUID } from "crypto";
 import { networkInterfaces } from 'os';
 import { ReadableOptions,Readable, Writable } from "stream";
@@ -69,7 +69,7 @@ interface DebugClient {
 let poiNum=1;
 let proxId = 0;
 
-type GetScopeCallback = ()=>object;
+type GetScopeCallback = (src: string)=>ReturnType<typeof eval>;
 type Poi = (gsc: GetScopeCallback)=>void | Promise<void>;
 type PoiSub = null | ((scope: any )=> boolean);
 interface PoiDesc {
@@ -410,6 +410,12 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
         }
     });
 
+    r.defineCommand('e', (src)=>{
+        if(r.context.e) {
+            r.context.e(src);
+        }
+    });
+
     r.defineCommand('poi', (cmd: string)=>{
         if(!cmd) {
             out('\nPoint of interest commands:');
@@ -478,8 +484,8 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
                     out(`Resuming ${poi.desc} ${pid}`);
                     const resume = poi.resume;
                     poi.resume=null;
+                    delete r.context.e;
                     setImmediate( resume );
-                    delete r.context[`poi_${poi.id}`];
                     return;
                 }
 
@@ -494,18 +500,19 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
                         out('via what? ignored');
                     }
                 }
-                poi.sub = (scope)=>{
+                poi.sub = (ecb)=>{
                     const stack = (new Error().stack ?? '').split('\n').slice(3).join('\n');
                     if(poi.subVia && stack.indexOf(poi.subVia)=== -1) {
                         return false;
                     }
                     out(`\nEntered POI ${poi.id} - ${poi.desc}, via:`);
                     out( stack );
-                    r.context[`poi_${poi.id}`] = scope;
-                    out(`\nRegistered scope poi_${poi.id}:`);
-                    for(const k in scope) {
-                        out(`    ${k} [${typeof scope[k]}]`);
-                    }
+
+                    out('Execute in POI scope with e(src) and .e src');
+
+                    r.context.e = ecb;
+
+
                     out(`\nCode might be waiting: remember to .poi ${poi.id} to continue.\n`);
                     return true;
                 };
@@ -515,6 +522,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             }
         }
     });
+
 
     r.context.x = x;
     r.context.meta = {
@@ -615,7 +623,7 @@ function poi(desc: string): {desc: PoiDesc, breakFunc: Poi} {
 
     return {
         breakFunc: (scopeCb: GetScopeCallback) =>{
-            if(self.sub && self.sub(scopeCb()) ) {
+            if(self.sub && self.sub(scopeCb) ) {
                 self.sub = null;
                 return new Promise( resolve=>{
                     self.resume = resolve;
@@ -642,7 +650,7 @@ type Split<S extends string, Delimiter extends string = ','> =
 
 // Create a mapped type to enforce the structure of the callback argument
 type BreakMap<BreakName extends string> = {
-    [K in Split<BreakName>[number]]: any; // All keys must exist and have a value
+    [K in Split<BreakName>[number]]: Poi; // All keys must exist and have a value
 };
 
 
@@ -681,7 +689,7 @@ export function delPoi(pfun: Function) {
  * @param instance optional - class instance
  * @returns 
  */
-export function addPoi<BreakList extends string>(fname: string, breaks:BreakList, body: FpoiWrapper<BreakList>, instance: any=undefined) {
+export function addPoi<BreakList extends string>(fname: string, breaks:BreakList, body: FpoiWrapper<BreakList>,) {
 
     proxId++;
 
@@ -715,7 +723,6 @@ export function addPoi<BreakList extends string>(fname: string, breaks:BreakList
         proxVia: undefined,
         orig,
         pois,
-        instance,
         tracking: false,
         stacks: {}
     };
@@ -731,13 +738,13 @@ export function addPoi<BreakList extends string>(fname: string, breaks:BreakList
             desc.stacks[stack]++;
 
             if(desc.proxVia && stack.indexOf(desc.proxVia) != -1) {
-                return desc.proxy.apply(instance, arguments);
+                return desc.proxy.apply(null, arguments);
             } else {
-                return desc.orig.apply(instance, arguments);
+                return desc.orig.apply(null, arguments);
             }
         }
 
-        return desc.proxy.apply(instance, arguments);
+        return desc.proxy.apply(null, arguments);
     }) as <Args extends any[]>(...args: Args)=>ReturnType<typeof orig>;
 
     (poiFun as any)._dbgRplProxId = desc.proxId;

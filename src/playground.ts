@@ -5,14 +5,15 @@ class StrangeClass {
 
     strangeAdditions = addPoi('strangeAdditions', 'justCalled,addedFirst,beforeReturn', ({justCalled,  addedFirst, beforeReturn}) =>
         async (c: number) => {
-            await justCalled( ()=>({instance: this, c}));
+            let something='else';
+            await justCalled( s=>eval(s) );
             this.a += this.b;
-            await addedFirst( ()=>({instance: this}));
+            await addedFirst( s=>eval(s) );
             this.a += c;
             const returnValue = this.a + this.b + c;
-            await beforeReturn( ()=>({instance: this, returnValue}));
+            await beforeReturn( s=>eval(s) );
             return returnValue;
-    }, this);
+    });
 }
 
 const sc = new StrangeClass(1,2);
@@ -23,6 +24,5 @@ setInterval( async()=>{
     console.log(importantResult);
 }, 10000);
 
-cap({sc});
 
-
+cap( { ectx: (s:string)=>eval(s) });
