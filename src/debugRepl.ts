@@ -1,5 +1,5 @@
 
-import vm, { Context } from 'node:vm';
+import vm, { Context, runInContext } from 'node:vm';
 import { randomUUID } from "crypto";
 import { networkInterfaces } from 'os';
 import { ReadableOptions,Readable, Writable } from "stream";
@@ -63,14 +63,17 @@ interface DebugClient {
     ws: WebSocket
 };
 
+// Function proxies (new idea)
+const fProxies: {[key:string]: FproxDesc} = {
 
+}
 
 // Register a point of interest (dynamic breakpoint)
 let poiNum=1;
 let proxId = 0;
 
-type GetScopeCallback = (src: string)=>ReturnType<typeof eval>;
-type Poi = (gsc: GetScopeCallback)=>void | Promise<void>;
+type CtxInjector = (src: string)=>ReturnType<typeof eval>;
+type Poi = (gsc: CtxInjector)=>void | Promise<void>;
 type PoiSub = null | ((scope: any )=> boolean);
 interface PoiDesc {
     id: number;
@@ -289,6 +292,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
         out('  .x        -- Show info about values registered with "cap()".');
         out('  .str VAR  -- Pretty JSON.stringify the variable and show it.');
         out('  .from SRCNAME DSTNAME -- Send the string representation of SRC name to file DSTNAME on socket client.');
+        out('  .fp       -- Faster/better/smarter proxy function than poi, probably, who knows, a different approach anyway.')
         out('');
     });
 
@@ -341,6 +345,74 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
         }
         out(`Tracking ${fpoiNum}`);
         fpoi.tracking=true;
+
+
+
+    });
+
+    r.context.fProxies = fProxies;
+    r.defineCommand('fp', (cmd: string)=>{
+
+        const argv = cmd.split(' ');
+
+        if(!argv[0]) {
+            out('.fp ls - list');
+            out('.fp get NAME - get info');
+            out('.fp break NAME - set breakpoint');
+            out('See also fProxies');
+            return;
+        }
+
+        if(argv[0] === 'ls') {
+            out('Registered functions:')
+            for(const p of Object.values(fProxies) ) {
+                out(`  ${p.name}`)
+            }
+            return;
+        }
+
+        if(argv[0] === 'break') {
+            const p = fProxies[argv[1]];
+            if(p) {
+                p.setBreak( async (bpStack:string, args: any[])=>{
+                    out(`Hit function proxy breakpoint ${p.name} via:`);
+                    out(bpStack);
+                    out('Local variables (this):');
+                    out( JSON.stringify(p.runInCtx('Object.keys[this]')));
+                    const ctxName = `brk_${p.name}`;
+                    r.context[ctxName]={};
+                    r.context[ctxName].args = args;
+                    r.context[ctxName].eval = p.runInCtx;
+                    r.context[ctxName].fp = p;
+                    out(`Available in ${ctxName} are:`)
+                    out(`    .fp     - This functionProxy`);
+                    out(`    .args   - ${args.length} arguments`);
+                    out(`    .eval   - Evaluate code in that scope, returns value`);
+                    out(`    .resume - Call this to resume and call the active implementatio`);
+
+                    return new Promise( resolve=> r.context[ctxName].resume = resolve ).then( ()=>{
+                        out(`Resuming ${p.name} ...`);
+                        delete r.context[ctxName];
+                    });
+                });
+            } else {
+                out(`${argv[1]} not found`);
+
+            }
+            return;
+        }
+
+        if(argv[0] === 'get') {
+            const p = fProxies[argv[1]];
+            if(p) {
+                const ctxName = `fp_${p.name}`;
+                r.context[ctxName] = p;
+                out(`Available in ${ctxName}`);
+            } else {
+                out(`${argv[1]} not found`);
+            }
+        }
+
 
 
 
@@ -622,7 +694,7 @@ function poi(desc: string): {desc: PoiDesc, breakFunc: Poi} {
     };
 
     return {
-        breakFunc: (scopeCb: GetScopeCallback) =>{
+        breakFunc: (scopeCb: CtxInjector) =>{
             if(self.sub && self.sub(scopeCb) ) {
                 self.sub = null;
                 return new Promise( resolve=>{
@@ -637,25 +709,6 @@ function poi(desc: string): {desc: PoiDesc, breakFunc: Poi} {
 
 }
 
-type Trim<S extends string> = S extends ` ${infer T}` | `${infer T} `
-  ? Trim<T>
-  : S;
-
-type Split<S extends string, Delimiter extends string = ','> =
-  S extends `${infer Head}${Delimiter}${infer Tail}`
-    ? [Trim<Head>, ...Split<Tail, Delimiter>]
-    : S extends ''
-      ? []
-      : [Trim<S>];
-
-// Create a mapped type to enforce the structure of the callback argument
-type BreakMap<BreakName extends string> = {
-    [K in Split<BreakName>[number]]: Poi; // All keys must exist and have a value
-};
-
-
-
-type FpoiWrapper<T extends string> = (poiMap: BreakMap<T>)=>(...args: any)=>any;
 
 
 export function delPoi(pfun: Function) {
@@ -689,7 +742,36 @@ export function delPoi(pfun: Function) {
  * @param instance optional - class instance
  * @returns 
  */
-export function addPoi<BreakList extends string>(fname: string, breaks:BreakList, body: FpoiWrapper<BreakList>,) {
+
+ type Trim<S extends string> = S extends ` ${infer T}` | `${infer T} `
+ ? Trim<T>
+ : S;
+
+type Split<S extends string, Delimiter extends string = ','> =
+ S extends `${infer Head}${Delimiter}${infer Tail}`
+   ? [Trim<Head>, ...Split<Tail, Delimiter>]
+   : S extends ''
+     ? []
+     : [Trim<S>];
+
+// Create a mapped type to enforce the structure of the callback argument
+type BreakMap<BreakName extends string> = {
+   [K in Split<BreakName>[number]]: Poi; // All keys must exist and have a value
+};
+
+
+
+type FpoiWrapper<
+    T extends string,
+    ImplType,
+    > = (poiMap: BreakMap<T>)=>ImplType;
+
+
+export function addPoi
+    <
+        BreakList extends string,
+        ImplType extends (...args: any[])=>any
+    > (fname: string, breaks:BreakList, body: FpoiWrapper<BreakList, ImplType>): ReturnType<typeof body> {
 
     proxId++;
 
@@ -745,10 +827,78 @@ export function addPoi<BreakList extends string>(fname: string, breaks:BreakList
         }
 
         return desc.proxy.apply(null, arguments);
-    }) as <Args extends any[]>(...args: Args)=>ReturnType<typeof orig>;
+    }) as ReturnType<typeof body>;
 
     (poiFun as any)._dbgRplProxId = desc.proxId;
 
     return poiFun;
 
+}
+
+
+interface FproxDesc {
+    name: string,
+    setProxyImpl: any,
+    delproxyImpl: any,
+    runInCtx: any,
+    setBreak: any,
+    delBreak: any,
+    proxFun?: any,
+    break?: any,
+    via?: string,
+}
+
+export function fProx<T extends (...args: any[]) => any>(
+    name: string,
+    impl: T,
+    runInCtx: CtxInjector
+): T {
+
+    const desc: FproxDesc = {
+        name,
+        runInCtx,
+        setProxyImpl: (impl: T)=>{
+            desc.proxFun = runInCtx( impl.toString() );
+        },
+        delproxyImpl: ()=>{
+            delete desc.proxFun;
+        },
+        setBreak: (cb: any) => {
+            desc.break = cb;
+        },
+        delBreak: ()=>{
+            delete desc.break;
+        }
+    };
+
+    let nextNum=1;
+    let tryName = name;
+    while(fProxies[tryName]) {
+        tryName = `${name}_${nextNum}`;
+        nextNum++;
+    }
+    name = tryName;
+
+    fProxies[tryName] = desc;
+
+    async function proxy() {
+
+        if(desc.break) {
+            const args = Array.from(arguments);
+            const bpStack = (new Error().stack ?? '').split('\n').slice(2).join('\n');
+            await desc.break(bpStack, args);
+            delete desc.break;
+        }
+
+        if(desc.via) {
+            const stack = (new Error().stack ?? '').split('\n').slice(2).join('\n');
+            if(desc.via && stack.indexOf(desc.via) != -1) {
+                return desc.proxFun.apply(null, arguments);
+            }
+        } else if(desc.proxFun) {
+            return desc.proxFun.apply(null, arguments);
+        }
+        return (impl as any).apply(null, arguments);
+    }
+    return proxy as T;
 }
