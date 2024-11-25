@@ -6,8 +6,27 @@ import { ReadableOptions,Readable, Writable } from "stream";
 import WebSocket, { WebSocketServer } from "ws";
 import repl from "node:repl";
 
+
 const x: Record<string, any> = {};
 const registeredMeta: Record<string, string> = {};
+
+const authSocketUrl = ( process.env.DBGRPL_DISABLE_AUTH !== 'true');
+const socketPort = parseInt(process.env.DBGRPL_PORT as string) || 31374;
+const socketHost = (process.env.DBGRPL_LOCALHOST_ONLY === 'true')?'127.0.0.1':'0.0.0.0';
+
+
+// @ts-ignore
+if( !WeakRef ) {
+    class WeakRef {
+        private obj = { debugRepl: 'No WeekRef in this runtime.'};
+        constructor( any: any ) {
+            console.log(this.obj.debugRepl);
+        }
+        deref() {
+            return this.obj;
+        }
+    }
+}
 
 
 class CInStream extends Readable {
@@ -64,9 +83,17 @@ interface DebugClient {
 };
 
 // Function proxies (new idea)
-const fProxies: {[key:string]: FproxDesc} = {
+const fProxies: {[key:string]: FproxDesc} = {};
 
+// SetPoi (new idea)
+interface SPoi {
+    name: string;
+    stack: string;
+    runInCtx: null | CtxInjector;
+    breakCb: null | (()=>Promise<void>);
 }
+
+const sPois: { [key:string]: SPoi } = {};
 
 // Register a point of interest (dynamic breakpoint)
 let poiNum=1;
@@ -102,10 +129,10 @@ interface PoiEntry {
 let poiList: PoiEntry[] = [];
 let clients: DebugClient[] = [];
 let logClients: DebugClient[] = [];
-let token: string | null = null;
+let token = '';
 
 let oldLog: any;
-let wss: WebSocketServer;
+let wss: WebSocketServer | null = null;
 
 function stopSocket() {
 
@@ -118,14 +145,21 @@ function stopSocket() {
     console.log = oldLog;
 
     setTimeout( ()=> {
-        wss.close();
-        token = null;
+        wss?.close();
+        token = '';
+        wss = null;
         console.log('Stopped debugRepl socket.');
     }, 10);
 }
 
 function startSocket() {
-    token = randomUUID();
+    console.log('\n\ndebugRepl socket started:');
+    if(authSocketUrl) {
+        token = randomUUID();
+    } else {
+        console.log('NOTE: DBGRPL_DISABLE_SOCKET_AUTH is set, accepting all connections.');
+    }
+
     oldLog = console.log.bind(console);
 
     console.log = (...args)=>{
@@ -136,20 +170,21 @@ function startSocket() {
         }
     };
 
-    const port = 31374;
-    console.log(`debugRepl started:`);
     const nets = (networkInterfaces() ?? {} )as {[key:string]: any};
     for (const name of Object.keys(nets)) {
         for (const net of nets[name]) {
-            if (net.family === 'IPv4' || net.family === 'IPv6') {
-                console.log(`node ${__dirname}/../bin/wsClient.js\tws://${net.address}:${port}/${token}`);
+            if (
+                    (net.family === 'IPv4' || net.family === 'IPv6' ) &&
+                    (socketHost === '0.0.0.0' || net.address === '127.0.0.1' || net.address === '::1')
+                ) {
+                    console.log(`node ${__dirname}/../bin/wsClient.js\tws://${net.address}:${socketPort}/${token}`);
             }
         }
     }
-    console.log();
+    console.log('\n');
 
     let clientNum=0;
-    wss = new WebSocket.Server({ port });
+    wss = new WebSocket.Server({ host: socketHost, port: socketPort });
     wss.on('connection', (ws: WebSocket, req: Request) => {
 
         const out = (...args: any)=>{
@@ -164,7 +199,7 @@ function startSocket() {
             }
         }, 1000);
         clientNum++;
-        if( req.url !== `/${token}`) {
+        if( authSocketUrl && req.url !== `/${token}`) {
             out(`Error: Invalid token.`);
             console.log(`debugRepl: Client ${clientNum} connect via invalid path ${req.url}: Closed.`);
             return ws.close();
@@ -198,6 +233,7 @@ function startSocket() {
         });
 
         const r = startRepl(input, output, out);
+        r.context.meta.ws = ws;
 
         r.defineCommand('toggleConsoleLog', ()=>{
             if( logClients.some( c => c.clientNum === client.clientNum ) ) {
@@ -256,11 +292,20 @@ function startSocket() {
                     const toName = msg.toName;
                     const filename = msg.fileName;
                     try {
-                        //const fromResult = eval(str);
-                        const script = new vm.Script(str, {filename});
-                        const inResult = script.runInThisContext();
-                        out(`debugRepl: ${toName} = ${typeof inResult} from ${filename} (${str.length} b) `);
-                        r.context[toName] = inResult;
+                        if(msg.fp) {
+                            const p = fProxies[toName];
+                            if(!p) {
+                                out(`debugRepl: Got ws message for nonexisting fp ${toName}`);
+                                return;
+                            }
+                            out(`debugRepl: Evaluating fp ${str.length} b impl in ctx ${toName}`);
+                            p.setProxyImplSrc(str);
+                        } else {
+                            const script = new vm.Script(str, {filename});
+                            const inResult = script.runInThisContext();
+                            out(`debugRepl: ${toName} = ${typeof inResult} from ${filename} (${str.length} b) `);
+                            r.context[toName] = inResult;
+                        }
                     } catch(e) {
                         out(`debugRepl: Evaluation failed: ${(e as Error).message}`);
                     }
@@ -359,6 +404,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             out('.fp ls - list');
             out('.fp get NAME - get info');
             out('.fp break NAME - set breakpoint');
+            out('.fp edit NAME - Send impl src to wsClient, on change, recompile and proxy.')
             out('See also fProxies');
             return;
         }
@@ -413,10 +459,110 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             }
         }
 
+        if(argv[0] === 'edit') {
+            if(!r.context.meta) {
+                out('edit only available with wsClient');
+                return;
+            }
+            const p = fProxies[argv[1]];
+            if(p) {
+                const toName = `${argv[1]}`
+                r.context.meta.ws.send( JSON.stringify( { toName, from: p.impl.toString(), fp:true}) );
+                
+            } else {
+                out(`${argv[1]} not found`);
+            }
+        }
 
+    });
+
+
+    r.defineCommand('sp', (cmd: string)=>{
+        if(!cmd) {
+            out('.sp (smart POI) usage:');
+            out('  ls - List sPois');
+            out('  clr       - Clear all breakpoints');
+            out('  delete    - Delete all registered pois');
+            out('  brk NAME  - Break next time sPoi is called (does not autoclear)');
+            out('  sbrk NAME - Break ONLY next time sPoi is called')
+            out(' See also the sp object');
+            return;
+        }
+
+
+        const argv = cmd.split(' ');
+
+        const l = Object.values(sPois);
+        if(argv[0] === 'ls') {
+            out('Registered sPois:');
+            for(const p of l) {
+                out(`  ${p.name}  ${p.breakCb ? 'brk':''}`);
+                out(p.stack);
+            }
+            return;
+        }
+
+        if(argv[0] === 'clr') {
+            out('All sPoi breakpoints removed.');
+            for(const p of l) {
+                p.breakCb=null;
+            }
+            return;
+        }
+
+        if(argv[0] === 'delete') {
+            out('All sPois deleted.');
+            for(const k in sPois) {
+                delete sPois[k];
+            }
+            return;
+        }
+
+        if(argv[0] === 'brk' || argv[0] === 'sbrk') {
+            const pp = sPois[argv[1]];
+            if(!pp) {
+                out(`sPoi ${argv[1]} not found`);
+                return;
+            }
+
+            const ctxName = `brk_sp_${pp.name}`;
+            r.context[ctxName] = {
+                sp: pp,
+                clr: ()=> {
+                    pp.breakCb=null;
+                }
+            };
+
+            pp.breakCb = async () => {
+
+
+                out(`\nHit ${pp.name} via:`);
+                out(pp.stack);
+                out(`  Registered ${ctxName}`);
+                out(`  .sp       - Info on this sPoi`);
+                if(argv[0] === 'brk') {
+                    out(`  .clr()    - Clear breakpoint, ${ctxName}, and resume execution)`);
+                }
+                out(`  .resume() - Resume execution\n`);
+
+                if(argv[0] === 'sbrk') {
+                    pp.breakCb = null;
+                    out('sbrk: breakpoint cleared')
+                }
+
+
+                return new Promise( resolve => {
+                    r.context[ctxName].resume=resolve;
+                }).then( ()=> {
+                    delete r.context[ctxName];
+                });
+            };
+        }
 
 
     });
+    r.context.sp = sPois;
+
 
     r.defineCommand('prox', (cmd: string)=>{
         if(!cmd) {
@@ -605,7 +751,8 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
         cap,
         unCap,
         addPoi,
-        delPoi
+        delPoi,
+        sPoi,
     };
 
     return r;
@@ -624,15 +771,15 @@ if(process.stdout.isTTY && process.env.DBGRPL_NO_STDIO !== 'true') {
 }
 
 function toggleSocket() {
-    if(!token) {
+    if(!wss) {
         startSocket();
     } else {
         stopSocket();
     }
 }
 
-if(process.env.DBRPL_SOCKET_ON_BOOT === 'true') {
-    toggleSocket();
+if(process.env.DBGRPL_WS_ON_BOOT === 'true') {
+    setTimeout( startSocket, 2000 );
 }
 
 if(process.env.DBGRPL_NO_SOCKETS !== 'true') {
@@ -642,26 +789,15 @@ if(process.env.DBGRPL_NO_SOCKETS !== 'true') {
 }
 
 
-/*
-    Importing this file starts the REPL
-    Calling cap registers an object or function for use in
-    interactive experiements or debugging sessions.
 
-    All registered objects are added to the x object which is available in the REPL context.
-    x - The object containing all registered objects and functions
-
-    // Example:
-    const myObject = ...
-
-    cap({objectOne: myObject, ...});
-    //x.objectOne is now available for read/write from the debug repl.
+interface CapOpts {
+    weak: boolean,
+}
 
 
-*/
-
-export function cap(v: Record<string, any>) {
+export function cap(v: Record<string, any>, opts?: CapOpts) {
     const registeredNames = Object.keys(x);
-    const source = (new Error().stack??'').split('\n').slice(2).join('\n');
+    let source = (new Error().stack??'').split('\n').slice(2).join('\n');
     for(const k in v) {
         if(registeredNames.some( rn => rn=== k)) {
             console.log(`debugRepl: Overwriting registered name '${k}'`);
@@ -669,8 +805,15 @@ export function cap(v: Record<string, any>) {
             console.log(registeredMeta[k]);
         }
 
+        if(opts?.weak) {
+            source += '\n  as WeakRef!'
+            // @ts-ignore
+            x[k] = new WeakRef( v[k] );
+        } else {
+            x[k] = v[k];
+        }
         registeredMeta[k] = source;
-        x[k] = v[k];
+
     }
 };
 
@@ -836,29 +979,64 @@ export function addPoi
 }
 
 
+
+export function sPoi(name: string, getCtx: CtxInjector): Promise<void> | void {
+    const thisPoi = sPois[name];
+    if(thisPoi) {
+        if(!thisPoi.breakCb) {
+            return;
+        }
+        thisPoi.stack = (new Error().stack ?? '').split('\n').slice(2).join('\n');
+        thisPoi.runInCtx = getCtx;
+        return thisPoi.breakCb();
+    } else {
+        sPois[name] = {
+            name,
+            stack: (new Error().stack ?? '').split('\n').slice(2).join('\n'),
+            runInCtx: getCtx,
+            breakCb: null,
+        };
+    }
+}
+
+
 interface FproxDesc {
     name: string,
     setProxyImpl: any,
+    setProxyImplSrc: any;
+    setVia: any;
     delproxyImpl: any,
     runInCtx: any,
     setBreak: any,
     delBreak: any,
     proxFun?: any,
+    impl: any,
     break?: any,
     via?: string,
 }
 
 export function fProx<T extends (...args: any[]) => any>(
     name: string,
+    runInCtx: CtxInjector,
     impl: T,
-    runInCtx: CtxInjector
 ): T {
 
     const desc: FproxDesc = {
         name,
         runInCtx,
+        impl,
         setProxyImpl: (impl: T)=>{
             desc.proxFun = runInCtx( impl.toString() );
+        },
+        setProxyImplSrc: (src: string)=>{
+            desc.proxFun = runInCtx( src );
+        },
+        setVia(str?: string) {
+            if(str) {
+                desc.via = str;
+            } else {
+                delete desc.via;
+            }
         },
         delproxyImpl: ()=>{
             delete desc.proxFun;

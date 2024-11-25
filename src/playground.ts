@@ -1,4 +1,4 @@
-import { addPoi, cap, fProx } from "./debugRepl";
+import { addPoi, cap, fProx, sPoi } from "./debugRepl";
 
 class StrangeClass {
     constructor(private a: number, private b: number) {}
@@ -15,9 +15,24 @@ class StrangeClass {
             return returnValue;
     });
 
-    differentApproach = fProx( 'differentApproach',
+    strangeAdditions2 = fProx('strangeAdditions2', s=>eval(s), async (c: number) => {
+        let something='else';
+        this.a -= this.b;
+        this.a -= c;
+        const returnValue = this.a + this.b + c;
+        await sPoi('returning', s=>eval(s));
+        return returnValue;
+        
+    });
+
+    async run(n:number) {
+        await this.differentApproach(n);
+        await this.strangeAdditions2(n);
+    }
+
+
+    differentApproach = fProx( 'differentApproach', s=>eval(s),
         (c: number ) => (c+this.a)*this.b,
-        s=>eval(s)
     );
 }
 
@@ -25,7 +40,7 @@ const sc = new StrangeClass(1,2);
 
 
 const interval = setInterval( async()=>{
-    const importantResult = await sc.strangeAdditions(3);
+    const importantResult = await sc.run(3);
     console.log(importantResult);
 }, 10000);
 
