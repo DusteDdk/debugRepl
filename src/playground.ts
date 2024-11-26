@@ -22,13 +22,12 @@ class StrangeClass {
         const returnValue = this.a + this.b + c;
         await sPoi('returning', s=>eval(s));
         return returnValue;
-        
     });
 
-    async run(n:number) {
+    run = fProx('run', s=>eval(s), async (n:number) =>{
         await this.differentApproach(n);
         await this.strangeAdditions2(n);
-    }
+    });
 
 
     differentApproach = fProx( 'differentApproach', s=>eval(s),

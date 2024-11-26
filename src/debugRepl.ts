@@ -468,7 +468,6 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             if(p) {
                 const toName = `${argv[1]}`
                 r.context.meta.ws.send( JSON.stringify( { toName, from: p.impl.toString(), fp:true}) );
-                
             } else {
                 out(`${argv[1]} not found`);
             }
@@ -795,6 +794,7 @@ interface CapOpts {
 }
 
 
+// API Locked.
 export function cap(v: Record<string, any>, opts?: CapOpts) {
     const registeredNames = Object.keys(x);
     let source = (new Error().stack??'').split('\n').slice(2).join('\n');
@@ -979,7 +979,7 @@ export function addPoi
 }
 
 
-
+// API Locked.
 export function sPoi(name: string, getCtx: CtxInjector): Promise<void> | void {
     const thisPoi = sPois[name];
     if(thisPoi) {
@@ -1015,6 +1015,7 @@ interface FproxDesc {
     via?: string,
 }
 
+// API locked.
 export function fProx<T extends (...args: any[]) => any>(
     name: string,
     runInCtx: CtxInjector,
