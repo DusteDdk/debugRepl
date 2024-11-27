@@ -45,50 +45,6 @@ data. Or to capture an object that contains a property which can then
 be set to indicate whether to capture additional values, and control this
 via the REPL.
 
-
-## addPoi( 'name', 'here, there', instrumentedImplementation)
-addPoi registers a Point of Interest" (POI) in the program.
-POIs are functions which can mark certain points in the execution
-by calling light-weight "marker" functions. When nobody is subscribed,
-these functions evaluate only two conditionals before exiting.
-The marker functions return a promise which can be awaited,
-this creates a one-shot execution stop if someone is subscribed to
-a marker while it is called, otherwise it continues immediately.
-Here is an example of a class which has its "addNumbers" method
-registered as a point of interest:,
-
-class SpecialClass {
-    constructor(private a: number, private b: number) {}
-
-    addNumbers = addPoi('addNumbers', 'before, after', ({before, after})=>
-        async (c: number)=>{
-            await before( s=>eval(s));
-            this.a += b+c;
-            await after( s=>eval(s) );
-            return this.a;
-        });
-}
-
-const sc = new SpecialClass(1,2);
-const veryImportantResult = await sc.addNumbers(3);
-
-Note how the before and after names from the string are available
-as keys on the object passed as the first argument to the first callback,
-the value of these is a function which returns a promise (for suspending execution if needed)
-and takes a callback which should should take a string and evalate it, to allow execution in the local context.
-
-In the "before" marker, the three variables are exposed.
-
-The markers can then be "subscribed" to, meaning the promise will suspend execution until
-values have been inspected/modified and I want to continue running the rest of the code.
-In contrast to a traditional breakpoint, this does not suspend the process, the program is running WHILE this
-single path is suspended, meaning other clients may be served by as server while I intercept a single call.
-
-
-## delPoi( poi )
-The function takes the function returned by addPoi and unregisters it.
-Useful for instrumenting medium-lived methods without leaking memory.
-
 ## sPoi('name', CtxInjector)
 sPoi (smarter point of interest)  is another idea for breakpoints with less syntax. In contrast to addPoi, where breakpoints can
 be subscribed to before their code-path has been executed, sPois only become visible when their path has been
@@ -103,7 +59,7 @@ same context as the original function, making it easier to replace original impl
 Environment variables
 =====================
 The following variables are available to control the debugRepl behaviour.
-DBGRPL_NO_STDIO=true       - Never open REPL on stdin/out (default: false)
+DBGRPL_STDIO_ON_BOOT=true  - Open REPL on stdin/out if output is a TTY (default: false)
 DBGRPL_NO_SOCKETS=true     - Never open websocket for REPL (default: false)
 DBGRPL_WS_ON_BOOT=true     - Start a websocket on boot (default: false)
 DBGRPL_DISABLE_AUTH=true   - Don't validate the URL token, allow any connection (default: false)
@@ -133,17 +89,20 @@ new implementation) and so on and so forth and what have you.
 
 Repl commands
 =============
-.fp is for interacting with fProxies created with fProx()
-.sp is for interacting with sPois created with sPoi()
+.help - Shows what commands there are, any command with no parameter will show its own help text.
 
-.poi is for interacting with POIs created with addPoi()
-.track and .prox is for interacting with the pois marked (function)
+.fp is for interacting with function proxies (created with fProx)
+.sp is for interacting with sPointOfInterests (created with sPoi)
+.x shows the summary of cap()tured values and where they were registered from.
 
-.str NAME stringifies the value of the name (function source code, object json, whatever)
-.from SRC DST is only available when using the wsClient, it reads the value of SRC, sends it wsClient which writes it as a file on
+.str NAME stringifies stuff in the local (debugRepl module) context
+
+Available with wsClient:
+.from SRC DST reads the value of SRC, sends it wsClient which writes it as a file on
 the local filesystem and watches that files for changes, when the file changes, it sends it back to the debugRepl which evaluates
 it and sets DST to be its value.
-
+.edit NAME INJECTOR - Extracts the variable NAME from ctx, sends to file, and evaluates back onto NAME inside context on file change.
+.fp edit NAME
 
 It's late
 =========

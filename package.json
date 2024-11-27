@@ -1,6 +1,6 @@
 {
   "name": "@dusted/debugrepl",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "DSTs debug REPL",
   "main": "dist/debugRepl.js",
   "types": "dist/debugRepl.d.ts",

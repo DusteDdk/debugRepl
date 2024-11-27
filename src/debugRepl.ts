@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { networkInterfaces } from 'os';
 import { ReadableOptions,Readable, Writable } from "stream";
 import WebSocket, { WebSocketServer } from "ws";
-import repl from "node:repl";
+import repl, { REPLServer } from "node:repl";
 
 
 const x: Record<string, any> = {};
@@ -20,7 +20,7 @@ if( !WeakRef ) {
     class WeakRef {
         private obj = { debugRepl: 'No WeekRef in this runtime.'};
         constructor( any: any ) {
-            console.log(this.obj.debugRepl);
+            console.log(this.obj);
         }
         deref() {
             return this.obj;
@@ -95,43 +95,13 @@ interface SPoi {
 
 const sPois: { [key:string]: SPoi } = {};
 
-// Register a point of interest (dynamic breakpoint)
-let poiNum=1;
-let proxId = 0;
 
 type CtxInjector = (src: string)=>ReturnType<typeof eval>;
-type Poi = (gsc: CtxInjector)=>void | Promise<void>;
-type PoiSub = null | ((scope: any )=> boolean);
-interface PoiDesc {
-    id: number;
-    desc: string;
-    sub: PoiSub;
-    subVia: undefined | string;
-    resume: any;
-}
 
-interface PoiEntry {
-    proxId: number;
-    name: string;
-    setProxy: Function;
-    unsetProxy: Function;
-    proxy: Function;
-    isProxied: boolean;
-    proxVia: string | undefined;
-    orig: Function;
-    pois: PoiDesc[];
-    instance?: any;
-    tracking: boolean;
-    stacks: {[key: string]: number},
-}
-
-
-let poiList: PoiEntry[] = [];
 let clients: DebugClient[] = [];
-let logClients: DebugClient[] = [];
+
 let token = '';
 
-let oldLog: any;
 let wss: WebSocketServer | null = null;
 
 function stopSocket() {
@@ -142,13 +112,12 @@ function stopSocket() {
 
     clients=[];
 
-    console.log = oldLog;
 
     setTimeout( ()=> {
         wss?.close();
         token = '';
         wss = null;
-        console.log('Stopped debugRepl socket.');
+        console.log('debugRepl: websocket stopped');
     }, 10);
 }
 
@@ -157,18 +126,10 @@ function startSocket() {
     if(authSocketUrl) {
         token = randomUUID();
     } else {
-        console.log('NOTE: DBGRPL_DISABLE_SOCKET_AUTH is set, accepting all connections.');
+        console.log('  NOTE: DBGRPL_DISABLE_SOCKET_AUTH is set, accepting all connections.');
     }
 
-    oldLog = console.log.bind(console);
 
-    console.log = (...args)=>{
-        oldLog.apply(console, args);
-        args.unshift('>');
-        for(const c of logClients) {
-            c.ws.send(JSON.stringify({c:args}));
-        }
-    };
 
     const nets = (networkInterfaces() ?? {} )as {[key:string]: any};
     for (const name of Object.keys(nets)) {
@@ -187,7 +148,7 @@ function startSocket() {
     wss = new WebSocket.Server({ host: socketHost, port: socketPort });
     wss.on('connection', (ws: WebSocket, req: Request) => {
 
-        const out = (...args: any)=>{
+        const sOut = (...args: any)=>{
             ws.send(JSON.stringify({b:Buffer.from( args.join(' ')+'\n', 'utf8').toString('hex')}));
         };
 
@@ -200,7 +161,7 @@ function startSocket() {
         }, 1000);
         clientNum++;
         if( authSocketUrl && req.url !== `/${token}`) {
-            out(`Error: Invalid token.`);
+            sOut(`Error: Invalid token.`);
             console.log(`debugRepl: Client ${clientNum} connect via invalid path ${req.url}: Closed.`);
             return ws.close();
         }
@@ -225,25 +186,18 @@ function startSocket() {
 
 
 
-        out(`Welcome to debugRepl session ${token}`);
+        sOut(`Welcome to debugRepl session ${token}`);
 
         const input = new CInStream(undefined);
         const output = new COutStream(undefined, (data, encoding)=>{
             ws.send(JSON.stringify({b: data.toString('hex')}));
         });
 
-        const r = startRepl(input, output, out);
+
+        const {r, out} = startRepl(input, output);
         r.context.meta.ws = ws;
 
-        r.defineCommand('toggleConsoleLog', ()=>{
-            if( logClients.some( c => c.clientNum === client.clientNum ) ) {
-                logClients = logClients.filter( c=> c.clientNum !== client.clientNum);
-                out('console.log messages: disabled');
-            } else {
-                logClients.push(client);
-                out('console.log messages: enabled');
-            }
-        });
+
 
 
         r.defineCommand('from', (cmd: string)=>{
@@ -261,9 +215,42 @@ function startSocket() {
                 } else if(typeof inObj === 'function') {
                     ws.send( JSON.stringify( { toName, from: inObj.toString()}) );
                 }
+                setTimeout( ()=>r.displayPrompt(), 100 );
 
             } else {
-                out('Usage: .from SRCNAME to DESTNAME - sends object to client file and declares DESTNAME in local context on file change (websocket only)');
+                out('Usage: .from SRCNAME to DESTNAME - send to client file and declares DESTNAME in local context on file change (websocket only)');
+                return;
+            }
+        });
+
+        // .edit interval._onTimeout in x.ectx
+        r.defineCommand('edit', (cmd: string)=>{
+            const [inName,_ , ctxName] = cmd.split(' ');
+            if(inName && _ === 'in' && ctxName) {
+
+                const ctx = vm.runInThisContext(ctxName);
+                if(!ctx || typeof ctx !== 'function') {
+                    out(`CtxInjector '$ctxName' must exist and be a function`);
+                    r.displayPrompt();
+                    return;
+                }
+
+                const inObj = ctx(inName);
+                if(!inObj) {
+                    out(`${inName} not found via ${ctxName}`);
+                    r.displayPrompt();
+                    return;
+                }
+
+                if(typeof inObj === 'object') {
+                    ws.send( JSON.stringify( { toName: inName, from: `(${JSON.stringify(inObj,null,4)})`, ctxName}) );
+                } else if(typeof inObj === 'function') {
+                    ws.send( JSON.stringify( { toName: inName, from: inObj.toString(), ctxName}) );
+                }
+                setTimeout( ()=>r.displayPrompt(), 100 );
+
+            } else {
+                out('Usage: .edit target in CtxInjector');
                 return;
             }
         });
@@ -295,25 +282,40 @@ function startSocket() {
                         if(msg.fp) {
                             const p = fProxies[toName];
                             if(!p) {
-                                out(`debugRepl: Got ws message for nonexisting fp ${toName}`);
+                                out(`\ndebugRepl: Got ws message for nonexisting fp ${toName}`);
+                                r.displayPrompt();
                                 return;
                             }
                             out(`debugRepl: Evaluating fp ${str.length} b impl in ctx ${toName}`);
                             p.setProxyImplSrc(str);
+                            r.displayPrompt();
+                        } else if(msg.ctxName) {
+
+                            const tCtx = eval(msg.ctxName);
+                            if(!tCtx || typeof tCtx !== 'function') {
+                                out(`\ndebugRepl: Got ws message for nonexisting CtxInjector ${msg.ctxName}`);
+                                r.displayPrompt();
+                                return;
+                            }
+                            const inResult = tCtx(`${msg.toName} = ${str}`);
+                            out(`\ndebugRepl: ${toName} = ${typeof inResult} from ${filename} (${str.length} b) in ${msg.ctxName}`);
+                            r.displayPrompt();
                         } else {
-                            const script = new vm.Script(str, {filename});
-                            const inResult = script.runInThisContext();
-                            out(`debugRepl: ${toName} = ${typeof inResult} from ${filename} (${str.length} b) `);
+                            const inResult = eval(str);
+                            out(`\ndebugRepl: ${toName} = ${typeof inResult} from ${filename} (${str.length} b)`);
                             r.context[toName] = inResult;
+                            r.displayPrompt();
                         }
                     } catch(e) {
-                        out(`debugRepl: Evaluation failed: ${(e as Error).message}`);
+                        out(`\ndebugRepl: Evaluation failed: ${(e as Error).message}`);
+                        r.displayPrompt();
                     }
                 }
 
             } catch(e) {
                 console.error(`debugRepl: Error parsing message from ${clientNum}`);
                 console.error(e);
+
             }
         });
     });
@@ -321,10 +323,15 @@ function startSocket() {
 }
 
 
-function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, out: (...args: any[])=>any) {
+function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream) {
 
 
     const r = repl.start({ useGlobal: true, prompt: 'x: ', input, output });
+
+    const out = (...args: any)=>{
+        r.output.write(args.join(' ')+'\n');
+    };
+
     r.setupHistory('/tmp/node.repl.hist', (err: any)=>{
         if(err) {
             out('Repl history error');
@@ -333,12 +340,14 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
 
     r.defineCommand('help', ()=>{
         out('\nDSTs debugRepl help:');
-        out('  .poi      -- Show how to use points of interest.');
+        out('  .fp       -- Function Proxy stuff.')
+        out('  .sp       -- SetPointOfInterest stuff.')
         out('  .x        -- Show info about values registered with "cap()".');
         out('  .str VAR  -- Pretty JSON.stringify the variable and show it.');
         out('  .from SRCNAME DSTNAME -- Send the string representation of SRC name to file DSTNAME on socket client.');
-        out('  .fp       -- Faster/better/smarter proxy function than poi, probably, who knows, a different approach anyway.')
+        out('  .edit NAME CONTEXT -- Send to client, replace in context');
         out('');
+        r.displayPrompt();
     });
 
     r.defineCommand('str', (name: string)=>{
@@ -349,51 +358,19 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
         } catch(e) {
             out((e as Error).message);
         }
+        r.displayPrompt();
     });
 
     r.defineCommand('x', ()=>{
-        out(`x:`);
+        out(`\nCaptured values:`);
         for(const k in x) {
-            out(`  x.${k} (${typeof x[k]}) registered:`)
+            out(`  x.${k} (${typeof x[k]})`)
             out(`${registeredMeta[k]}\n`);
         }
+        r.displayPrompt();
     });
 
-    r.defineCommand('track', (cmd: string)=>{
-        if(!cmd) {
-            out('See .poi');
-            return;
-        }
 
-        if(cmd==='ls') {
-            out('Tracked points of interest functions:');
-            for(const pe of poiList) {
-                out(`  ${pe.proxId}: ${pe.name} ${pe.tracking ? '(tracking)': '(not tracking)'}`);
-                const k = Object.keys(pe.stacks);
-                if(!k.length) {
-                    out('  Calls: 0');
-                }
-                for(const s in pe.stacks) {
-                    out(`  Calls: ${pe.stacks[s]}`);
-                    out(s);
-                    out('');
-                }
-            }
-            return;
-        }
-        const fpoiNum = parseInt(cmd);
-
-        const fpoi = poiList.find( fp=>fp.proxId === fpoiNum);
-        if(!fpoi) {
-            out(`No fpoi ${fpoiNum}`);
-            return;
-        }
-        out(`Tracking ${fpoiNum}`);
-        fpoi.tracking=true;
-
-
-
-    });
 
     r.context.fProxies = fProxies;
     r.defineCommand('fp', (cmd: string)=>{
@@ -406,14 +383,17 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             out('.fp break NAME - set breakpoint');
             out('.fp edit NAME - Send impl src to wsClient, on change, recompile and proxy.')
             out('See also fProxies');
+            r.displayPrompt();
             return;
         }
 
         if(argv[0] === 'ls') {
-            out('Registered functions:')
+            out('\nFunction proxies:')
             for(const p of Object.values(fProxies) ) {
-                out(`  ${p.name}`)
+                out(`  ${p.name}`);
+                out(`${p.stack}\n`)
             }
+            r.displayPrompt();
             return;
         }
 
@@ -421,7 +401,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             const p = fProxies[argv[1]];
             if(p) {
                 p.setBreak( async (bpStack:string, args: any[])=>{
-                    out(`Hit function proxy breakpoint ${p.name} via:`);
+                    out(`\ndebugRepl: Hit function proxy breakpoint ${p.name} via:`);
                     out(bpStack);
                     out('Local variables (this):');
                     out( JSON.stringify(p.runInCtx('Object.keys[this]')));
@@ -435,16 +415,17 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
                     out(`    .args   - ${args.length} arguments`);
                     out(`    .eval   - Evaluate code in that scope, returns value`);
                     out(`    .resume - Call this to resume and call the active implementatio`);
-
+                    r.displayPrompt();
                     return new Promise( resolve=> r.context[ctxName].resume = resolve ).then( ()=>{
                         out(`Resuming ${p.name} ...`);
                         delete r.context[ctxName];
+                        r.displayPrompt();
                     });
                 });
             } else {
                 out(`${argv[1]} not found`);
-
             }
+            r.displayPrompt();
             return;
         }
 
@@ -457,11 +438,14 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             } else {
                 out(`${argv[1]} not found`);
             }
+            r.displayPrompt();
+            return;
         }
 
         if(argv[0] === 'edit') {
-            if(!r.context.meta) {
+            if(!r.context.meta.ws) {
                 out('edit only available with wsClient');
+                r.displayPrompt();
                 return;
             }
             const p = fProxies[argv[1]];
@@ -471,6 +455,8 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             } else {
                 out(`${argv[1]} not found`);
             }
+            setTimeout( ()=>r.displayPrompt(), 100 );
+            return;
         }
 
     });
@@ -485,6 +471,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             out('  brk NAME  - Break next time sPoi is called (does not autoclear)');
             out('  sbrk NAME - Break ONLY next time sPoi is called')
             out(' See also the sp object');
+            r.displayPrompt();
             return;
         }
 
@@ -493,11 +480,13 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
 
         const l = Object.values(sPois);
         if(argv[0] === 'ls') {
-            out('Registered sPois:');
+            out('\nRegistered sPois:');
             for(const p of l) {
                 out(`  ${p.name}  ${p.breakCb ? 'brk':''}`);
                 out(p.stack);
+                out('');
             }
+            r.displayPrompt();
             return;
         }
 
@@ -506,6 +495,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             for(const p of l) {
                 p.breakCb=null;
             }
+            r.displayPrompt();
             return;
         }
 
@@ -514,6 +504,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             for(const k in sPois) {
                 delete sPois[k];
             }
+            r.displayPrompt();
             return;
         }
 
@@ -521,6 +512,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             const pp = sPois[argv[1]];
             if(!pp) {
                 out(`sPoi ${argv[1]} not found`);
+                r.displayPrompt();
                 return;
             }
 
@@ -533,8 +525,6 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             };
 
             pp.breakCb = async () => {
-
-
                 out(`\nHit ${pp.name} via:`);
                 out(pp.stack);
                 out(`  Registered ${ctxName}`);
@@ -549,7 +539,7 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
                     out('sbrk: breakpoint cleared')
                 }
 
-
+                r.displayPrompt();
                 return new Promise( resolve => {
                     r.context[ctxName].resume=resolve;
                 }).then( ()=> {
@@ -558,188 +548,16 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
             };
         }
 
-
     });
     r.context.sp = sPois;
 
-
-    r.defineCommand('prox', (cmd: string)=>{
-        if(!cmd) {
-            out('See .poi');
-            return;
-        }
-
-        if(cmd === 'ls') {
-            out(`Point of interest functions:`);
-            for(const pe of poiList) {
-                out(`  ${pe.proxId}: ${pe.name} ${pe.tracking ? '(tracking)': '(not tracking)'}`);
-            }
-            out(``);
-            return;
-        }
-
-        const [fpoiStr, funName, via, stackStr] = cmd.split(' ').map( s=>s.replace(/ /g, ''));
-
-
-        const fpoiNum = parseInt(fpoiStr);
-
-
-        const fpoi = poiList.find( fp=>fp.proxId === fpoiNum);
-        if(!fpoi) {
-            out(`No fpoi ${fpoiNum}`);
-            return;
-        }
-
-        if(funName === 'ls') {
-            out(`Source for fpoi ${poiNum}`);
-            out(fpoi.proxy.toString());
-            return;
-        }
-
-        if(funName === 'via') {
-            out('via is a reserved name for .prox it may not be used in functions.\nDid you forget the function name?');
-            return;
-        }
-
-        if(funName === 'to' && via) {
-            out(`Saving active implementation of ${fpoiNum} to local variable ${via}`);
-            r.context[via] = fpoi.proxy;
-            return;
-        }
-
-        if(!funName) {
-            out(`Unproxied ${fpoi.proxId} ${fpoi.name}`);
-            fpoi.unsetProxy();
-        } else {
-            const funImpl = eval(funName);
-            if(!funImpl) {
-                out(`No function with name ${funName}`);
-                return;
-            }
-            out(`Proxied ${fpoi.proxId} ${fpoi.name} with ${funName}`);
-            if(via==='via') {
-                out(`    via stacks with ${stackStr} (started tracking stacks)`);
-                out('    calls via unmatched stacks goes to original impl.');
-                fpoi.tracking=true;
-                fpoi.proxVia=stackStr;
-            }
-            fpoi.setProxy(funImpl);
-        }
-    });
 
     r.defineCommand('e', (src)=>{
         if(r.context.e) {
             r.context.e(src);
         }
+        r.displayPrompt();
     });
-
-    r.defineCommand('poi', (cmd: string)=>{
-        if(!cmd) {
-            out('\nPoint of interest commands:');
-            out('  .poi ls - list registered POIs and their possible breaks.');
-            out('  .poi BNUM [via STR]')
-            out('    - when not subscribed: Subscribes to poi break BNUM,')
-            out('      when "via STR" provided, only where stacktrace contains STR.');
-            out('    - when subscribed: Unsubscribes.');
-            out('    - when was called: Continues execution.');
-            out('\nStack trace discovery:');
-            out('  .track ls  - Show recorded stack traces for POIs.');
-            out('  .track PNUM - Toggle recording of stack traces for POI.');
-            out('\nOverwriting POIs:');
-            out('  .prox ls  - list proxied implementations.');
-            out('  .prox PNUM ls - List source for currently active implementation.');
-            out('  .prox PNUM [NAME [via STR]]');
-            out('    - When no proxy is in place: Replaces original implementation with function of NAME for POI');
-            out('      when "via STR" provided, call function of NAME only when stacktrace contains STR,');
-            out('        note: "via STR" enables tracking.');
-            out('    - When any proxy is in place: Restores original implementation.');
-            out('  .prox PNUM to DSTNAME - save reference to implementation in DSTNAME');
-            return;
-        }
-
-        if(cmd === 'ls') {
-            out('Points of interest:');
-            for(const pe of poiList) {
-                out(`    ${pe.proxId}: ${pe.name}  (function)`);
-                if(pe.isProxied) {
-                    if(pe.proxVia) {
-                        out(`        -- Proxied when called via stack with ${pe.proxVia}`);
-                    } else {
-                        out(`        -- Proxied`);
-                    }
-                } else {
-                    for(const p of pe.pois) {
-                        out(`      ${p.id} - ${p.desc} - ${ p.sub ? 'subbed' +((p.subVia)?` (via ${p.subVia})`:'') : 'unsubbed'}`);
-                    }
-                }
-
-            }
-            out('.poi  NUM to break in next time it is executed');
-            return;
-        } else  {
-            const [pidStr, arga, argb] = cmd.split(' ').map( s=>s.replace(/ /g, ''));
-            const pid = parseInt(pidStr);
-            //const poi = pois.find( p => p.id === pid);
-            let poi: PoiDesc | undefined;
-            for(const pe of poiList) {
-                poi = pe.pois.find( p=>p.id === pid);
-                if(poi) {
-                    break;
-                }
-            }
-
-            if(poi) {
-                if(poi.sub) {
-                    // Unsubscribe
-                    out(`Unsubscribed from ${pid}`);
-                    poi.sub=null;
-                    return;
-                }
-
-                if(poi.resume) {
-                    // resume
-                    out(`Resuming ${poi.desc} ${pid}`);
-                    const resume = poi.resume;
-                    poi.resume=null;
-                    delete r.context.e;
-                    setImmediate( resume );
-                    return;
-                }
-
-                // Subscribe
-                out(`Subscribed to ${pid}`);
-                delete poi.subVia;
-                if(arga === 'via') {
-                    if(argb) {
-                        out(`    via stacks with ${argb}`);
-                        poi.subVia = argb;
-                    } else {
-                        out('via what? ignored');
-                    }
-                }
-                poi.sub = (ecb)=>{
-                    const stack = (new Error().stack ?? '').split('\n').slice(3).join('\n');
-                    if(poi.subVia && stack.indexOf(poi.subVia)=== -1) {
-                        return false;
-                    }
-                    out(`\nEntered POI ${poi.id} - ${poi.desc}, via:`);
-                    out( stack );
-
-                    out('Execute in POI scope with e(src) and .e src');
-
-                    r.context.e = ecb;
-
-
-                    out(`\nCode might be waiting: remember to .poi ${poi.id} to continue.\n`);
-                    return true;
-                };
-
-            } else {
-                out(`POI ${pid} not found.`);
-            }
-        }
-    });
-
 
     r.context.x = x;
     r.context.meta = {
@@ -749,27 +567,19 @@ function startRepl(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, 
     r.context.api = {
         cap,
         unCap,
-        addPoi,
-        delPoi,
+        fProx,
         sPoi,
     };
 
-    return r;
-}
-
-
-if(process.stdout.isTTY && process.env.DBGRPL_NO_STDIO !== 'true') {
-    setTimeout( ()=>{
-        const r = startRepl(process.stdin, process.stdout, console.log.bind(console));
-        r.defineCommand('debugReplSocket', ()=>{
-            toggleSocket();
-        });
-    }, 250);
-} else {
-    console.log(`No TTY, send SIGUSR1 to ${process.pid} to start debugRepl socket`);
+    return {r, out};
 }
 
 function toggleSocket() {
+    if(process.env.DBGRPL_NO_SOCKETS==='true') {
+        console.log('debugRepl: webSocket disabled by DBGRPL_NO_SOCKETS');
+        return;
+    }
+
     if(!wss) {
         startSocket();
     } else {
@@ -777,14 +587,41 @@ function toggleSocket() {
     }
 }
 
-if(process.env.DBGRPL_WS_ON_BOOT === 'true') {
-    setTimeout( startSocket, 2000 );
+let ttyRpl: undefined | REPLServer;
+
+export function debugReplTTY() {
+    if(!ttyRpl) {
+        if(process.stdout.isTTY) {
+            console.log('debugRepl started:');
+            ttyRpl = startRepl(process.stdin, process.stdout).r;
+            ttyRpl.defineCommand('debugReplSocket', toggleSocket);
+        } else {
+            console.error('debugRepl: stdout is not a TTY, not starting REPL on stdio.');
+            if(process.env.DBGRPL_NO_SOCKETS !== 'true') {
+                console.log(`Send signal SIGUSR1 to process ${process.pid} to start debugRepl socket.`);
+            }
+
+        }
+    }
 }
 
+if(process.env.DBGRPL_STDIO_ON_BOOT === 'true') {
+    setTimeout( ()=>{
+        debugReplTTY();
+    }, 500);
+}
+
+
+
 if(process.env.DBGRPL_NO_SOCKETS !== 'true') {
+
     process.on('SIGUSR1', ()=>{
         toggleSocket();
     });
+
+    if(process.env.DBGRPL_WS_ON_BOOT === 'true') {
+        setTimeout( startSocket, 2000 );
+    }
 }
 
 
@@ -797,7 +634,7 @@ interface CapOpts {
 // API Locked.
 export function cap(v: Record<string, any>, opts?: CapOpts) {
     const registeredNames = Object.keys(x);
-    let source = (new Error().stack??'').split('\n').slice(2).join('\n');
+    let source = (new Error().stack??'').split('\n').slice(2,3).join('\n');
     for(const k in v) {
         if(registeredNames.some( rn => rn=== k)) {
             console.log(`debugRepl: Overwriting registered name '${k}'`);
@@ -826,157 +663,6 @@ export function unCap(k: string) {
 
 
 
-function poi(desc: string): {desc: PoiDesc, breakFunc: Poi} {
-    const id = poiNum++;
-    const self: PoiDesc = {
-        id,
-        desc,
-        sub: null,
-        subVia:undefined,
-        resume: null,
-    };
-
-    return {
-        breakFunc: (scopeCb: CtxInjector) =>{
-            if(self.sub && self.sub(scopeCb) ) {
-                self.sub = null;
-                return new Promise( resolve=>{
-                    self.resume = resolve;
-                });
-
-            }
-            return;
-        },
-        desc: self
-    };
-
-}
-
-
-
-export function delPoi(pfun: Function) {
-    const proxId = (pfun as any)._dbgRplProxId;
-    if(proxId) {
-        console.log('Deleted poi'+proxId);
-        const peIndex = poiList.findIndex(e=>e.proxId === proxId);
-        if(peIndex !== -1) {
-            const pe = poiList[peIndex];
-            // Restore original impl.
-            pe.unsetProxy();
-            pe.stacks={};
-            for(const p of pe.pois) {
-                p.sub=null;
-                p.resume=null;
-                delete p.subVia;
-                p.desc='';
-            }
-            pe.pois=[];
-            poiList.splice(peIndex, 1); // Remove the object in place
-
-        }
-    }
-}
-
-/**
- * 
- * @param fname Function name or other human-readable descrption
- * @param breaks Comma separated list of desired breakpoint functions
- * @param body Function body to instrument
- * @param instance optional - class instance
- * @returns 
- */
-
- type Trim<S extends string> = S extends ` ${infer T}` | `${infer T} `
- ? Trim<T>
- : S;
-
-type Split<S extends string, Delimiter extends string = ','> =
- S extends `${infer Head}${Delimiter}${infer Tail}`
-   ? [Trim<Head>, ...Split<Tail, Delimiter>]
-   : S extends ''
-     ? []
-     : [Trim<S>];
-
-// Create a mapped type to enforce the structure of the callback argument
-type BreakMap<BreakName extends string> = {
-   [K in Split<BreakName>[number]]: Poi; // All keys must exist and have a value
-};
-
-
-
-type FpoiWrapper<
-    T extends string,
-    ImplType,
-    > = (poiMap: BreakMap<T>)=>ImplType;
-
-
-export function addPoi
-    <
-        BreakList extends string,
-        ImplType extends (...args: any[])=>any
-    > (fname: string, breaks:BreakList, body: FpoiWrapper<BreakList, ImplType>): ReturnType<typeof body> {
-
-    proxId++;
-
-    const pois: PoiDesc[] = [];
-
-    const names = breaks.replace(/ /g,'').split(',') as Split<BreakList>;
-    const pmap = {} as BreakMap<BreakList>;
-    for(const n of names) {
-        const p = poi(n);
-        pmap[(n as Split<BreakList>[number])] = p.breakFunc;
-        pois.push(p.desc);
-
-    }
-
-    const orig = body(pmap);
-
-    const desc: PoiEntry = {
-        proxId,
-        name: fname,
-        setProxy: (fun: Function)=>{
-            desc.isProxied=true;
-            desc.proxy = fun;
-        },
-        unsetProxy: ()=>{
-            desc.isProxied=false;
-            desc.proxy = orig;
-            delete desc.proxVia;
-        },
-        proxy: orig,
-        isProxied: false,
-        proxVia: undefined,
-        orig,
-        pois,
-        tracking: false,
-        stacks: {}
-    };
-
-    poiList.push(desc);
-
-    const poiFun = (function () {
-        if(desc.tracking) {
-            const stack = (new Error().stack ?? '').split('\n').slice(2).join('\n');
-            if(!desc.stacks[stack]) {
-                desc.stacks[stack]=0;
-            }
-            desc.stacks[stack]++;
-
-            if(desc.proxVia && stack.indexOf(desc.proxVia) != -1) {
-                return desc.proxy.apply(null, arguments);
-            } else {
-                return desc.orig.apply(null, arguments);
-            }
-        }
-
-        return desc.proxy.apply(null, arguments);
-    }) as ReturnType<typeof body>;
-
-    (poiFun as any)._dbgRplProxId = desc.proxId;
-
-    return poiFun;
-
-}
 
 
 // API Locked.
@@ -1004,6 +690,7 @@ interface FproxDesc {
     name: string,
     setProxyImpl: any,
     setProxyImplSrc: any;
+    stack: string;
     setVia: any;
     delproxyImpl: any,
     runInCtx: any,
@@ -1026,6 +713,7 @@ export function fProx<T extends (...args: any[]) => any>(
         name,
         runInCtx,
         impl,
+        stack: (new Error().stack??'').split('\n').slice(2,3).join('\n'),
         setProxyImpl: (impl: T)=>{
             desc.proxFun = runInCtx( impl.toString() );
         },
