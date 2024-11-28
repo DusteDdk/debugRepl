@@ -14,6 +14,15 @@ const authSocketUrl = ( process.env.DBGRPL_DISABLE_AUTH !== 'true');
 const socketPort = parseInt(process.env.DBGRPL_PORT as string) || 31374;
 const socketHost = (process.env.DBGRPL_LOCALHOST_ONLY === 'true')?'127.0.0.1':'0.0.0.0';
 
+let socketTimeout: ReturnType<typeof setTimeout> | null = null;
+let wsTimeoutMs = parseInt(process.env.DBGRPL_WS_TIMEOUT||'120') * 1000;
+
+function resetSocketTimeout() {
+    if(socketTimeout) {
+        clearTimeout(socketTimeout);
+    }
+    socketTimeout = setTimeout(stopSocket, wsTimeoutMs);
+}
 
 // @ts-ignore
 if( !WeakRef ) {
@@ -146,6 +155,12 @@ function startSocket() {
 
     let clientNum=0;
     wss = new WebSocket.Server({ host: socketHost, port: socketPort });
+
+    if(wsTimeoutMs) {
+        console.log(`debugRepl: Stopping socket server after ${wsTimeoutMs/1000} seconds of inactivity.`);
+        resetSocketTimeout();
+    }
+
     wss.on('connection', (ws: WebSocket, req: Request) => {
 
         const sOut = (...args: any)=>{
@@ -258,6 +273,10 @@ function startSocket() {
 
 
         ws.on('message', (buf)=>{
+
+            if(socketTimeout) {
+                resetSocketTimeout();
+            }
 
             try {
                 const msg = JSON.parse(buf.toString());

@@ -65,6 +65,7 @@ DBGRPL_WS_ON_BOOT=true     - Start a websocket on boot (default: false)
 DBGRPL_DISABLE_AUTH=true   - Don't validate the URL token, allow any connection (default: false)
 DBGRPL_PORT=NUMBER         - Start websocket server on port NUMBER (default: 31374 )
 DBGRPL_LOCALHOST_ONLY=true - Only allow websocket connections from localhost (default: false)
+DBGRPL_WS_TIMEOUT=0        - Seconds of inactivity that before stopping the websocket server again. (Default: 120, Disable: 0)
 
 
 Using the socket
